@@ -75,6 +75,7 @@ const state = {
   dragSelection: null,
   playbackFlashGlyph: null,
   playbackFlashTimer: null,
+  segmentLoadRequestId: 0,
 };
 
 function formatDuration(seconds) {
@@ -157,6 +158,118 @@ function pauseAllVideos() {
   for (const video of Object.values(videos)) {
     video?.pause();
   }
+}
+
+function median(values) {
+  if (!values.length) {
+    return null;
+  }
+
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+  return sorted[middle];
+}
+
+function estimateFollowerTime() {
+  const samples = [];
+  for (const cameraName of cameraOrder) {
+    if (cameraName === "front") {
+      continue;
+    }
+
+    const video = videos[cameraName];
+    if (!video?.src || video.readyState < 2) {
+      continue;
+    }
+
+    if (Number.isFinite(video.currentTime)) {
+      samples.push(video.currentTime);
+    }
+  }
+
+  return median(samples);
+}
+
+function waitForVideoReady(video, expectedClipId, requestId) {
+  if (video.dataset.clipId === expectedClipId && video.readyState >= 2) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      video.removeEventListener("loadeddata", handleReady);
+      video.removeEventListener("canplay", handleReady);
+      video.removeEventListener("error", handleError);
+    };
+
+    const handleReady = () => {
+      if (state.segmentLoadRequestId !== requestId) {
+        cleanup();
+        resolve(false);
+        return;
+      }
+
+      if (video.dataset.clipId === expectedClipId && video.readyState >= 2) {
+        cleanup();
+        resolve(true);
+      }
+    };
+
+    const handleError = () => {
+      cleanup();
+      reject(new Error(`Unable to load clip ${expectedClipId}.`));
+    };
+
+    video.addEventListener("loadeddata", handleReady);
+    video.addEventListener("canplay", handleReady);
+    video.addEventListener("error", handleError);
+  });
+}
+
+function seekVideo(video, targetTime, requestId) {
+  if (video.readyState < 1 || !Number.isFinite(targetTime) || Math.abs(video.currentTime - targetTime) < 0.05) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const cleanup = () => {
+      video.removeEventListener("seeked", handleSeeked);
+      video.removeEventListener("error", handleDone);
+      window.clearTimeout(timeoutId);
+    };
+
+    const handleDone = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const handleSeeked = () => {
+      if (state.segmentLoadRequestId !== requestId) {
+        handleDone();
+        return;
+      }
+      handleDone();
+    };
+
+    const timeoutId = window.setTimeout(handleDone, 800);
+    video.addEventListener("seeked", handleSeeked);
+    video.addEventListener("error", handleDone);
+
+    try {
+      video.currentTime = targetTime;
+    } catch {
+      handleDone();
+    }
+  });
 }
 
 function buildBlinkerMarkup(point) {
@@ -643,9 +756,14 @@ async function loadSegment(index, localTime = 0, autoplay = false) {
     return;
   }
 
+  const requestId = state.segmentLoadRequestId + 1;
+  state.segmentLoadRequestId = requestId;
   state.activeSegmentIndex = index;
   state.pendingSeekTime = localTime;
   const byCamera = Object.fromEntries(segment.cameras.map((camera) => [camera.cameraName, camera]));
+  const frontVideo = videos.front;
+  const frontClip = byCamera.front;
+  const frontClipChanged = frontVideo?.dataset.clipId !== frontClip?.clipId;
 
   for (const cameraName of cameraOrder) {
     const clip = byCamera[cameraName];
@@ -654,43 +772,54 @@ async function loadSegment(index, localTime = 0, autoplay = false) {
       continue;
     }
     if (!clip) {
+      video.pause();
       video.removeAttribute("src");
+      delete video.dataset.clipId;
       video.load();
       continue;
     }
     if (video.dataset.clipId !== clip.clipId) {
+      video.pause();
       video.src = clip.url;
       video.dataset.clipId = clip.clipId;
       video.load();
     }
   }
 
-  const frontVideo = videos.front;
-  const onReady = () => {
-    for (const cameraName of cameraOrder) {
-      const video = videos[cameraName];
-      if (video?.readyState >= 1) {
-        try {
-          video.currentTime = localTime;
-        } catch {}
-      }
+  if (frontClip && (frontClipChanged || frontVideo.readyState < 2)) {
+    const ready = await waitForVideoReady(frontVideo, frontClip.clipId, requestId);
+    if (!ready || state.segmentLoadRequestId !== requestId) {
+      return;
     }
-    if (autoplay) {
-      state.isPlaying = true;
-      for (const cameraName of cameraOrder) {
-        videos[cameraName]?.play().catch(() => {});
-      }
-    }
-    highlightActiveSegment();
-    updateTransport();
-    frontVideo.removeEventListener("loadedmetadata", onReady);
-  };
-
-  if (frontVideo.readyState >= 1) {
-    onReady();
-  } else {
-    frontVideo.addEventListener("loadedmetadata", onReady);
   }
+
+  await seekVideo(frontVideo, localTime, requestId);
+  if (state.segmentLoadRequestId !== requestId) {
+    return;
+  }
+
+  for (const cameraName of cameraOrder) {
+    const video = videos[cameraName];
+    if (video?.readyState >= 1) {
+      try {
+        video.currentTime = localTime;
+      } catch {}
+    }
+  }
+
+  if (autoplay) {
+    state.isPlaying = true;
+    await frontVideo.play().catch(() => {});
+    for (const cameraName of cameraOrder) {
+      if (cameraName === "front") {
+        continue;
+      }
+      videos[cameraName]?.play().catch(() => {});
+    }
+  }
+
+  highlightActiveSegment();
+  updateTransport();
 }
 
 async function seekGlobalTime(timeSeconds, autoplay = state.isPlaying) {
@@ -999,10 +1128,65 @@ function attachSelectionEvents() {
 
 function attachVideoEvents() {
   const frontVideo = videos.front;
+  let lastFrontTime = 0;
+  let lastFrontAdvanceAt = performance.now();
+  let recoveryCooldownUntil = 0;
+
+  const resumeFrontPlayback = () => {
+    if (state.isPlaying && frontVideo.paused && !frontVideo.ended && frontVideo.readyState >= 2) {
+      frontVideo.play().catch(() => {});
+    }
+  };
+
+  const recoverFrontPlayback = (force = false) => {
+    if (!state.event || !state.isPlaying || !videos.front?.src) {
+      return;
+    }
+
+    const now = performance.now();
+    if (!force && now < recoveryCooldownUntil) {
+      return;
+    }
+
+    const segment = state.event.segments[state.activeSegmentIndex];
+    if (!segment || frontVideo.ended) {
+      return;
+    }
+
+    const followerTime = estimateFollowerTime();
+    const expectedLocalTime = followerTime ?? Math.max(0, state.globalTime - segment.offsetSeconds);
+    const stalledForMs = now - lastFrontAdvanceAt;
+    const frontPausedUnexpectedly = frontVideo.paused && !frontVideo.ended;
+    const frontLagSeconds = Number.isFinite(expectedLocalTime) ? Math.abs(expectedLocalTime - frontVideo.currentTime) : 0;
+    const stalled = stalledForMs > 650 && frontLagSeconds > 0.2;
+    const buffering = frontVideo.readyState < 2;
+
+    if (!force && !frontPausedUnexpectedly && !stalled && !buffering) {
+      return;
+    }
+
+    recoveryCooldownUntil = now + 1200;
+    const safeTarget = Math.max(0, Math.min(expectedLocalTime, Math.max(segment.durationSeconds - 0.05, 0)));
+
+    if (Number.isFinite(safeTarget) && Math.abs(frontVideo.currentTime - safeTarget) > 0.05) {
+      try {
+        frontVideo.currentTime = safeTarget;
+      } catch {}
+    }
+
+    frontVideo.play().catch(() => {});
+  };
+
   frontVideo.addEventListener("timeupdate", () => {
     if (!state.event) {
       return;
     }
+
+    if (Math.abs(frontVideo.currentTime - lastFrontTime) > 0.01) {
+      lastFrontTime = frontVideo.currentTime;
+      lastFrontAdvanceAt = performance.now();
+    }
+
     const segment = state.event.segments[state.activeSegmentIndex];
     state.globalTime = segment.offsetSeconds + frontVideo.currentTime;
     updateTransport();
@@ -1023,6 +1207,16 @@ function attachVideoEvents() {
     }
     await loadSegment(nextIndex, 0, true);
   });
+
+  frontVideo.addEventListener("canplay", resumeFrontPlayback);
+  frontVideo.addEventListener("loadeddata", resumeFrontPlayback);
+  frontVideo.addEventListener("waiting", () => recoverFrontPlayback(true));
+  frontVideo.addEventListener("stalled", () => recoverFrontPlayback(true));
+  frontVideo.addEventListener("pause", () => recoverFrontPlayback(false));
+
+  window.setInterval(() => {
+    recoverFrontPlayback(false);
+  }, 250);
 }
 
 function attachTelemetryTimelineEvents() {
