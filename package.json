@@ -1,0 +1,13 @@
+{
+  "name": "tesla-dashcam-viewer",
+  "version": "0.1.0",
+  "description": "Local browser viewer and compositor for Tesla dashcam clips with SEI metadata.",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pngjs": "^7.0.0"
+  }
+}

@@ -1,0 +1,6 @@
+.env
+.DS_Store
+.map-cache
+exports/
+2026*/
+node_modules/
