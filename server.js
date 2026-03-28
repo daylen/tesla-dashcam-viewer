@@ -24,6 +24,13 @@ const mapCacheDir = path.join(rootDir, ".map-cache");
 const repository = new EventRepository(rootDir);
 const exportJobs = new Map();
 
+function formatDuration(seconds) {
+  const value = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(value / 60);
+  const secs = value % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
 function parseExportRange(request, maxDuration) {
   const body = request.body ?? {};
   const rawStart = Number.isFinite(body.startSeconds) ? body.startSeconds : 0;
@@ -141,6 +148,9 @@ app.get("/api/events/:eventId/export", async (request, response, next) => {
     const job = exportJobs.get(exportJobKey(eventId, range.startSeconds, range.endSeconds));
     response.json({
       status: job?.status ?? "idle",
+      label: job?.label ?? null,
+      detail: job?.detail ?? null,
+      progress: job?.progress ?? 0,
       outputUrl: job?.outputPath ? `/exports/${encodeURIComponent(path.basename(job.outputPath))}` : null,
       error: job?.error ?? null,
     });
@@ -162,15 +172,48 @@ app.post("/api/events/:eventId/export", async (request, response, next) => {
       return;
     }
 
-    exportJobs.set(jobKey, { status: "running", outputPath: null, error: null });
+    exportJobs.set(jobKey, {
+      status: "running",
+      label: range.startSeconds > 0 || range.endSeconds < event.totalDurationSeconds
+        ? "Exporting selected range"
+        : "Exporting full event",
+      detail: "Preparing overlays and map assets...",
+      progress: 0,
+      outputPath: null,
+      error: null,
+    });
     response.status(202).json({ status: "running" });
 
     try {
-      const outputPath = await exportMasterView(event, exportDir, range);
-      exportJobs.set(jobKey, { status: "done", outputPath, error: null });
+      const outputPath = await exportMasterView(event, exportDir, {
+        ...range,
+        onProgress: ({ progress, encodedSeconds, durationSeconds }) => {
+          exportJobs.set(jobKey, {
+            status: "running",
+            label: range.startSeconds > 0 || range.endSeconds < event.totalDurationSeconds
+              ? "Exporting selected range"
+              : "Exporting full event",
+            detail: `Encoded ${formatDuration(encodedSeconds)} of ${formatDuration(durationSeconds)}`,
+            progress,
+            outputPath: null,
+            error: null,
+          });
+        },
+      });
+      exportJobs.set(jobKey, {
+        status: "done",
+        label: "Export ready",
+        detail: "The encoded master view is ready to open.",
+        progress: 1,
+        outputPath,
+        error: null,
+      });
     } catch (error) {
       exportJobs.set(jobKey, {
         status: "failed",
+        label: "Export failed",
+        detail: "The encoder stopped before finishing.",
+        progress: 0,
         outputPath: null,
         error: error instanceof Error ? error.message : String(error),
       });

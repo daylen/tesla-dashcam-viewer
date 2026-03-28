@@ -11,18 +11,30 @@ const elements = {
   eventList: document.querySelector("#eventList"),
   eventTitle: document.querySelector("#eventTitle"),
   eventSubtitle: document.querySelector("#eventSubtitle"),
-  playPauseButton: document.querySelector("#playPauseButton"),
   exportButton: document.querySelector("#exportButton"),
+  exportBanner: document.querySelector("#exportBanner"),
+  exportStatusLabel: document.querySelector("#exportStatusLabel"),
+  exportPercent: document.querySelector("#exportPercent"),
+  exportProgressFill: document.querySelector("#exportProgressFill"),
+  exportStatusDetail: document.querySelector("#exportStatusDetail"),
   refreshButton: document.querySelector("#refreshButton"),
   timelineRange: document.querySelector("#timelineRange"),
   timelinePosition: document.querySelector("#timelinePosition"),
   segmentLabel: document.querySelector("#segmentLabel"),
+  speedTimelineCanvas: document.querySelector("#speedTimelineCanvas"),
+  speedTimelineOverlay: document.querySelector("#speedTimelineOverlay"),
+  speedTimelineLabel: document.querySelector("#speedTimelineLabel"),
+  apTimelineCanvas: document.querySelector("#apTimelineCanvas"),
+  apTimelineOverlay: document.querySelector("#apTimelineOverlay"),
+  apTimelineLabel: document.querySelector("#apTimelineLabel"),
   selectionTrack: document.querySelector("#selectionTrack"),
   selectionWindow: document.querySelector("#selectionWindow"),
   selectionStartHandle: document.querySelector("#selectionStartHandle"),
   selectionEndHandle: document.querySelector("#selectionEndHandle"),
   selectionLabel: document.querySelector("#selectionLabel"),
   clearSelectionButton: document.querySelector("#clearSelectionButton"),
+  videoWall: document.querySelector("#videoWall"),
+  playbackGlyph: document.querySelector("#playbackGlyph"),
   telemetryStatus: document.querySelector("#telemetryStatus"),
   speedValue: document.querySelector("#speedValue"),
   autopilotValue: document.querySelector("#autopilotValue"),
@@ -37,14 +49,17 @@ const elements = {
   miniMapCanvas: document.querySelector("#miniMapCanvas"),
   miniMapStatus: document.querySelector("#miniMapStatus"),
   miniMapCaption: document.querySelector("#miniMapCaption"),
+  segmentsPanel: document.querySelector("#segmentsPanel"),
+  segmentsToggle: document.querySelector("#segmentsToggle"),
   segmentList: document.querySelector("#segmentList"),
   segmentCountLabel: document.querySelector("#segmentCountLabel"),
-  exportStatus: document.querySelector("#exportStatus"),
 };
 
 const videos = Object.fromEntries(
   cameraOrder.map((cameraName) => [cameraName, document.querySelector(`#video-${cameraName}`)]),
 );
+const videoCards = [...document.querySelectorAll(".video-card")];
+const videoToggleButtons = [...document.querySelectorAll("[data-toggle-playback]")];
 
 const state = {
   events: [],
@@ -58,6 +73,8 @@ const state = {
   exportRequest: null,
   selection: null,
   dragSelection: null,
+  playbackFlashGlyph: null,
+  playbackFlashTimer: null,
 };
 
 function formatDuration(seconds) {
@@ -74,6 +91,303 @@ function formatDate(info, fallbackId) {
 
   const date = new Date(info.timestamp);
   return date.toLocaleString();
+}
+
+function clamp01(value) {
+  return Math.max(0, Math.min(value, 1));
+}
+
+function setExportBanner({ status = "idle", label, detail, detailHtml = null, progress = 0 }) {
+  elements.exportBanner.classList.remove("is-idle", "is-running", "is-done", "is-failed");
+  elements.exportBanner.classList.add(`is-${status}`);
+  elements.exportStatusLabel.textContent = label;
+  elements.exportPercent.textContent = `${Math.round(clamp01(progress) * 100)}%`;
+  elements.exportProgressFill.style.width = `${clamp01(progress) * 100}%`;
+  if (detailHtml !== null) {
+    elements.exportStatusDetail.innerHTML = detailHtml;
+  } else {
+    elements.exportStatusDetail.textContent = detail;
+  }
+}
+
+function setSegmentsCollapsed(collapsed) {
+  elements.segmentsPanel.classList.toggle("is-collapsed", collapsed);
+  elements.segmentsToggle.setAttribute("aria-expanded", String(!collapsed));
+}
+
+function setVideoToggleDisabled(disabled) {
+  for (const button of videoToggleButtons) {
+    button.disabled = disabled;
+  }
+  for (const card of videoCards) {
+    card.classList.toggle("is-toggle-disabled", disabled);
+  }
+}
+
+function renderPlaybackOverlay() {
+  const showPaused = Boolean(state.event) && !state.isPlaying;
+  const isFlashing = Boolean(state.playbackFlashGlyph);
+  const glyph = state.playbackFlashGlyph ?? "▶";
+
+  elements.playbackGlyph.textContent = glyph;
+  elements.videoWall.classList.toggle("is-paused", showPaused);
+  elements.videoWall.classList.toggle("is-flashing", isFlashing);
+}
+
+function clearPlaybackFlash() {
+  if (state.playbackFlashTimer) {
+    window.clearTimeout(state.playbackFlashTimer);
+    state.playbackFlashTimer = null;
+  }
+  state.playbackFlashGlyph = null;
+}
+
+function flashPlaybackOverlay(glyph) {
+  clearPlaybackFlash();
+  state.playbackFlashGlyph = glyph;
+  renderPlaybackOverlay();
+  state.playbackFlashTimer = window.setTimeout(() => {
+    state.playbackFlashGlyph = null;
+    state.playbackFlashTimer = null;
+    renderPlaybackOverlay();
+  }, 650);
+}
+
+function pauseAllVideos() {
+  for (const video of Object.values(videos)) {
+    video?.pause();
+  }
+}
+
+function buildBlinkerMarkup(point) {
+  const icons = [];
+  if (point.blinkerOnLeft) {
+    icons.push(`
+      <span class="blinker-icon" title="Left blinker on" aria-label="Left blinker on">
+        <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+          <path d="M11 5 3 12l8 7v-4h10v-6H11z"></path>
+        </svg>
+      </span>
+    `);
+  }
+  if (point.blinkerOnRight) {
+    icons.push(`
+      <span class="blinker-icon" title="Right blinker on" aria-label="Right blinker on">
+        <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+          <path d="M13 5v4H3v6h10v4l8-7z"></path>
+        </svg>
+      </span>
+    `);
+  }
+
+  if (!icons.length) {
+    return '<span class="blinker-off">Off</span>';
+  }
+
+  return `<span class="blinker-icons">${icons.join("")}</span>`;
+}
+
+function resizeCanvasToDisplay(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(rect.width * dpr));
+  const height = Math.max(1, Math.round(rect.height * dpr));
+
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  const context = canvas.getContext("2d");
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { context, width: rect.width, height: rect.height };
+}
+
+function clearCanvas(canvas) {
+  const { context, width, height } = resizeCanvasToDisplay(canvas);
+  context.clearRect(0, 0, width, height);
+}
+
+function timelineMarkerX(width, timeSeconds, durationSeconds) {
+  if (!durationSeconds) {
+    return 0;
+  }
+  return (clampTime(timeSeconds) / durationSeconds) * width;
+}
+
+function isFsdActive(point) {
+  return point?.autopilotState === 1 || point?.autopilotLabel === "FSD";
+}
+
+function sampleTimelinePoints(timeline, width) {
+  if (!timeline.length) {
+    return [];
+  }
+
+  const step = Math.max(1, Math.ceil(timeline.length / Math.max(width, 1)));
+  const sampled = [];
+  for (let index = 0; index < timeline.length; index += step) {
+    sampled.push(timeline[index]);
+  }
+  if (sampled[sampled.length - 1] !== timeline[timeline.length - 1]) {
+    sampled.push(timeline[timeline.length - 1]);
+  }
+  return sampled;
+}
+
+function drawSpeedTimelineBase() {
+  const canvas = elements.speedTimelineCanvas;
+  const { context, width, height } = resizeCanvasToDisplay(canvas);
+  context.clearRect(0, 0, width, height);
+
+  const timeline = state.event?.metadataTimeline ?? [];
+  const duration = eventDuration();
+
+  if (!timeline.length || !duration) {
+    elements.speedTimelineLabel.textContent = "--";
+    return;
+  }
+
+  const sampled = sampleTimelinePoints(timeline, width);
+  const maxSpeed = Math.max(5, ...sampled.map((point) => point.speedMph || 0));
+  const padX = 8;
+  const padY = 8;
+  const innerWidth = Math.max(width - (padX * 2), 1);
+  const innerHeight = Math.max(height - (padY * 2), 1);
+
+  context.strokeStyle = "rgba(255, 255, 255, 0.08)";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(0, height - 0.5);
+  context.lineTo(width, height - 0.5);
+  context.moveTo(0, padY + 0.5);
+  context.lineTo(width, padY + 0.5);
+  context.stroke();
+
+  const tracePoints = sampled.map((point) => {
+    const x = padX + ((point.timeSeconds / duration) * innerWidth);
+    const y = height - padY - (((point.speedMph || 0) / maxSpeed) * innerHeight);
+    return { x, y };
+  });
+
+  if (tracePoints.length) {
+    context.beginPath();
+    context.moveTo(tracePoints[0].x, height - padY);
+    for (const point of tracePoints) {
+      context.lineTo(point.x, point.y);
+    }
+    context.lineTo(tracePoints[tracePoints.length - 1].x, height - padY);
+    context.closePath();
+    context.fillStyle = "rgba(36, 209, 255, 0.16)";
+    context.fill();
+
+    context.beginPath();
+    context.moveTo(tracePoints[0].x, tracePoints[0].y);
+    for (const point of tracePoints.slice(1)) {
+      context.lineTo(point.x, point.y);
+    }
+    context.strokeStyle = "#24d1ff";
+    context.lineWidth = 2;
+    context.stroke();
+  }
+
+  elements.speedTimelineLabel.textContent = `${Math.round(maxSpeed)} mph max`;
+}
+
+function drawApTimelineBase() {
+  const canvas = elements.apTimelineCanvas;
+  const { context, width, height } = resizeCanvasToDisplay(canvas);
+  context.clearRect(0, 0, width, height);
+
+  const timeline = state.event?.metadataTimeline ?? [];
+  const duration = eventDuration();
+
+  if (!timeline.length || !duration) {
+    elements.apTimelineLabel.textContent = "--";
+    return;
+  }
+
+  let lastX = 0;
+  for (let index = 0; index < timeline.length; index += 1) {
+    const point = timeline[index];
+    const nextPoint = timeline[index + 1];
+    const startX = (point.timeSeconds / duration) * width;
+    const endX = nextPoint ? (nextPoint.timeSeconds / duration) * width : width;
+
+    if (endX <= startX) {
+      continue;
+    }
+
+    context.fillStyle = isFsdActive(point) ? "rgba(52, 140, 255, 0.9)" : "rgba(130, 146, 166, 0.45)";
+    context.fillRect(startX, 0, Math.max(endX - startX, 1), height);
+    lastX = endX;
+  }
+
+  if (lastX < width) {
+    context.fillStyle = "rgba(130, 146, 166, 0.45)";
+    context.fillRect(lastX, 0, width - lastX, height);
+  }
+
+  context.strokeStyle = "rgba(255, 255, 255, 0.12)";
+  context.lineWidth = 1;
+  context.strokeRect(0.5, 0.5, width - 1, height - 1);
+
+  elements.apTimelineLabel.textContent = "Blue = FSD";
+}
+
+function drawTelemetryTimelineOverlay(point) {
+  const speedOverlay = resizeCanvasToDisplay(elements.speedTimelineOverlay);
+  const apOverlay = resizeCanvasToDisplay(elements.apTimelineOverlay);
+  speedOverlay.context.clearRect(0, 0, speedOverlay.width, speedOverlay.height);
+  apOverlay.context.clearRect(0, 0, apOverlay.width, apOverlay.height);
+
+  const duration = eventDuration();
+  if (!state.event || !duration) {
+    elements.speedTimelineLabel.textContent = "--";
+    elements.apTimelineLabel.textContent = "--";
+    return;
+  }
+
+  const speedX = timelineMarkerX(speedOverlay.width, state.globalTime, duration);
+  speedOverlay.context.strokeStyle = "rgba(255, 255, 255, 0.9)";
+  speedOverlay.context.lineWidth = 2;
+  speedOverlay.context.beginPath();
+  speedOverlay.context.moveTo(speedX, 0);
+  speedOverlay.context.lineTo(speedX, speedOverlay.height);
+  speedOverlay.context.stroke();
+
+  const timeline = state.event.metadataTimeline ?? [];
+  if (timeline.length && point) {
+    const maxSpeed = Math.max(5, ...timeline.map((entry) => entry.speedMph || 0));
+    const padX = 8;
+    const padY = 8;
+    const innerWidth = Math.max(speedOverlay.width - (padX * 2), 1);
+    const innerHeight = Math.max(speedOverlay.height - (padY * 2), 1);
+    const dotX = padX + ((point.timeSeconds / duration) * innerWidth);
+    const dotY = speedOverlay.height - padY - (((point.speedMph || 0) / maxSpeed) * innerHeight);
+
+    speedOverlay.context.fillStyle = "#58d1b2";
+    speedOverlay.context.beginPath();
+    speedOverlay.context.arc(dotX, dotY, 4.5, 0, Math.PI * 2);
+    speedOverlay.context.fill();
+
+    elements.speedTimelineLabel.textContent = `${Math.round(point.speedMph || 0)} mph`;
+    elements.apTimelineLabel.textContent = point.autopilotLabel || "Off";
+  }
+
+  const apX = timelineMarkerX(apOverlay.width, state.globalTime, duration);
+  apOverlay.context.strokeStyle = "rgba(255, 255, 255, 0.95)";
+  apOverlay.context.lineWidth = 2;
+  apOverlay.context.beginPath();
+  apOverlay.context.moveTo(apX, 0);
+  apOverlay.context.lineTo(apX, apOverlay.height);
+  apOverlay.context.stroke();
+}
+
+function redrawTelemetryTimelines() {
+  drawSpeedTimelineBase();
+  drawApTimelineBase();
+  drawTelemetryTimelineOverlay(getMetadataAtTime(state.globalTime));
 }
 
 function lonToMercatorX(longitude) {
@@ -199,22 +513,22 @@ function drawMiniMap(point) {
   context.rotate(angle);
   context.fillStyle = "rgba(0, 0, 0, 0.35)";
   context.beginPath();
-  context.arc(0, 0, 11, 0, Math.PI * 2);
+  context.arc(0, 0, 17, 0, Math.PI * 2);
   context.fill();
   context.fillStyle = "#58d1b2";
   context.beginPath();
-  context.arc(0, 0, 7, 0, Math.PI * 2);
+  context.arc(0, 0, 10, 0, Math.PI * 2);
   context.fill();
   context.fillStyle = "#24d1ff";
   context.beginPath();
-  context.moveTo(0, -18);
-  context.lineTo(10, 10);
-  context.lineTo(0, 4);
-  context.lineTo(-10, 10);
+  context.moveTo(0, -28);
+  context.lineTo(14, 14);
+  context.lineTo(0, 6);
+  context.lineTo(-14, 14);
   context.closePath();
   context.fill();
   context.strokeStyle = "rgba(0, 16, 24, 0.85)";
-  context.lineWidth = 2;
+  context.lineWidth = 3;
   context.stroke();
   context.restore();
 }
@@ -227,11 +541,12 @@ function updateHud(point) {
     elements.gearValue.textContent = "--";
     elements.steeringValue.textContent = "--";
     elements.brakeValue.textContent = "--";
-    elements.blinkersValue.textContent = "--";
+    elements.blinkersValue.innerHTML = '<span class="blinker-off">Off</span>';
     elements.latitudeValue.textContent = "--";
     elements.longitudeValue.textContent = "--";
     elements.headingValue.textContent = "--";
     drawMiniMap(null);
+    drawTelemetryTimelineOverlay(null);
     return;
   }
 
@@ -241,11 +556,12 @@ function updateHud(point) {
   elements.gearValue.textContent = point.gearLabel;
   elements.steeringValue.textContent = `${Math.round(point.steeringWheelAngle || 0)} deg`;
   elements.brakeValue.textContent = point.brakeApplied ? "Applied" : "Off";
-  elements.blinkersValue.textContent = [point.blinkerOnLeft ? "Left" : null, point.blinkerOnRight ? "Right" : null].filter(Boolean).join(" / ") || "Off";
+  elements.blinkersValue.innerHTML = buildBlinkerMarkup(point);
   elements.latitudeValue.textContent = point.latitudeDeg?.toFixed(6) ?? "--";
   elements.longitudeValue.textContent = point.longitudeDeg?.toFixed(6) ?? "--";
   elements.headingValue.textContent = `${Math.round(point.headingDeg || 0)} deg`;
   drawMiniMap(point);
+  drawTelemetryTimelineOverlay(point);
 }
 
 function syncFollowers(masterTime) {
@@ -420,7 +736,7 @@ function renderSegments() {
     button.dataset.segmentIndex = String(index);
     button.innerHTML = `
       <strong>${segment.key}</strong>
-      <span>${formatDuration(segment.offsetSeconds)} · ${segment.cameras.length} views · ${formatDuration(segment.durationSeconds)}</span>
+      <span>${formatDuration(segment.offsetSeconds)} · ${formatDuration(segment.durationSeconds)}</span>
     `;
     button.addEventListener("click", () => seekGlobalTime(segment.offsetSeconds, false));
     elements.segmentList.append(button);
@@ -440,7 +756,12 @@ async function pollExportStatus() {
   const response = await fetch(`/api/events/${encodeURIComponent(state.selectedEventId)}/export?${params.toString()}`);
   const payload = await response.json();
   if (payload.status === "done" && payload.outputUrl) {
-    elements.exportStatus.innerHTML = `Export ready: <a href="${payload.outputUrl}" target="_blank" rel="noreferrer">open video</a>`;
+    setExportBanner({
+      status: "done",
+      label: "Export ready",
+      detailHtml: `<a href="${payload.outputUrl}" target="_blank" rel="noreferrer">Open the encoded video</a>`,
+      progress: 1,
+    });
     window.clearInterval(state.pollTimer);
     state.pollTimer = null;
     state.exportRequest = null;
@@ -448,16 +769,26 @@ async function pollExportStatus() {
     return;
   }
   if (payload.status === "failed") {
-    elements.exportStatus.textContent = `Export failed: ${payload.error}`;
+    setExportBanner({
+      status: "failed",
+      label: "Export failed",
+      detail: payload.error || "The encoder stopped unexpectedly.",
+      progress: payload.progress ?? 0,
+    });
     window.clearInterval(state.pollTimer);
     state.pollTimer = null;
     state.exportRequest = null;
     elements.exportButton.disabled = false;
     return;
   }
-  elements.exportStatus.textContent = range.selected
-    ? `Encoding ${formatDuration(range.startSeconds)} to ${formatDuration(range.endSeconds)}...`
-    : "Encoding the full event...";
+  setExportBanner({
+    status: "running",
+    label: payload.label || (range.selected ? "Exporting selected range" : "Exporting full event"),
+    detail: payload.detail || (range.selected
+      ? `Encoding ${formatDuration(range.startSeconds)} to ${formatDuration(range.endSeconds)}...`
+      : "Encoding the full event..."),
+    progress: payload.progress ?? 0,
+  });
 }
 
 async function startExport() {
@@ -466,9 +797,14 @@ async function startExport() {
   }
 
   const selection = exportRange();
-  elements.exportStatus.textContent = selection.selected
-    ? `Starting export for ${formatDuration(selection.startSeconds)} to ${formatDuration(selection.endSeconds)}...`
-    : "Starting full-event export...";
+  setExportBanner({
+    status: "running",
+    label: selection.selected ? "Starting selected export" : "Starting full export",
+    detail: selection.selected
+      ? `Preparing ${formatDuration(selection.startSeconds)} to ${formatDuration(selection.endSeconds)}...`
+      : "Preparing the full event...",
+    progress: 0,
+  });
 
   const response = await fetch(`/api/events/${encodeURIComponent(state.selectedEventId)}/export`, {
     method: "POST",
@@ -490,7 +826,7 @@ async function startExport() {
   if (state.pollTimer) {
     window.clearInterval(state.pollTimer);
   }
-  state.pollTimer = window.setInterval(pollExportStatus, 3000);
+  state.pollTimer = window.setInterval(pollExportStatus, 1000);
   pollExportStatus().catch(() => {});
 }
 
@@ -524,8 +860,14 @@ async function selectEvent(eventId) {
   state.isPlaying = false;
   state.exportRequest = null;
   state.selection = null;
-  elements.playPauseButton.textContent = "Play";
-  elements.exportStatus.textContent = "No export started.";
+  clearPlaybackFlash();
+  renderPlaybackOverlay();
+  setExportBanner({
+    status: "idle",
+    label: "No export running",
+    detail: "Select a range and export only the portion you need.",
+    progress: 0,
+  });
 
   elements.eventTitle.textContent = payload.event.info?.street || eventId;
   elements.eventSubtitle.textContent = [
@@ -534,11 +876,12 @@ async function selectEvent(eventId) {
     payload.event.info?.reason || "No trigger reason",
   ].filter(Boolean).join(" · ");
 
-  elements.playPauseButton.disabled = false;
   elements.exportButton.disabled = false;
   elements.timelineRange.disabled = false;
+  setVideoToggleDisabled(false);
   loadMiniMapForEvent(payload.event);
   renderEvents();
+  redrawTelemetryTimelines();
   updateHud(getMetadataAtTime(0));
   renderSegments();
   updateTransport();
@@ -670,7 +1013,8 @@ function attachVideoEvents() {
     const nextIndex = state.activeSegmentIndex + 1;
     if (nextIndex >= state.event.segments.length) {
       state.isPlaying = false;
-      elements.playPauseButton.textContent = "Play";
+      clearPlaybackFlash();
+      renderPlaybackOverlay();
       return;
     }
     await loadSegment(nextIndex, 0, true);
@@ -684,22 +1028,21 @@ async function fetchEvents() {
   renderEvents();
 }
 
-elements.playPauseButton.addEventListener("click", async () => {
+async function togglePlayback() {
   if (!state.event) {
     return;
   }
   if (state.isPlaying) {
     state.isPlaying = false;
-    for (const video of Object.values(videos)) {
-      video?.pause();
-    }
-    elements.playPauseButton.textContent = "Play";
+    pauseAllVideos();
+    clearPlaybackFlash();
+    renderPlaybackOverlay();
     return;
   }
   state.isPlaying = true;
   await loadSegment(state.activeSegmentIndex, videos.front.currentTime || state.pendingSeekTime || 0, true);
-  elements.playPauseButton.textContent = "Pause";
-});
+  flashPlaybackOverlay("❚❚");
+}
 
 elements.timelineRange.addEventListener("input", (event) => {
   const value = Number(event.target.value);
@@ -709,12 +1052,18 @@ elements.timelineRange.addEventListener("input", (event) => {
 });
 
 elements.timelineRange.addEventListener("change", (event) => {
-  seekGlobalTime(Number(event.target.value), false).catch(() => {});
+  seekGlobalTime(Number(event.target.value), state.isPlaying).catch(() => {});
 });
 
 elements.exportButton.addEventListener("click", () => {
   startExport().catch((error) => {
-    elements.exportStatus.textContent = `Export failed: ${error.message}`;
+    setExportBanner({
+      status: "failed",
+      label: "Export failed",
+      detail: error.message,
+      progress: 0,
+    });
+    elements.exportButton.disabled = false;
   });
 });
 
@@ -727,15 +1076,39 @@ elements.refreshButton.addEventListener("click", () => {
   fetchEvents().catch(console.error);
 });
 
+elements.segmentsToggle.addEventListener("click", () => {
+  setSegmentsCollapsed(!elements.segmentsPanel.classList.contains("is-collapsed"));
+});
+
+for (const button of videoToggleButtons) {
+  button.addEventListener("click", () => {
+    togglePlayback().catch(console.error);
+  });
+}
+
 elements.miniMapImage.addEventListener("load", () => {
   drawMiniMap(getMetadataAtTime(state.globalTime));
 });
 
 window.addEventListener("resize", () => {
   drawMiniMap(getMetadataAtTime(state.globalTime));
+  redrawTelemetryTimelines();
   updateSelectionUi();
 });
 
 attachSelectionEvents();
 attachVideoEvents();
+setSegmentsCollapsed(true);
+setVideoToggleDisabled(true);
+renderPlaybackOverlay();
+setExportBanner({
+  status: "idle",
+  label: "No export running",
+  detail: "Select a range and export only the portion you need.",
+  progress: 0,
+});
+clearCanvas(elements.speedTimelineCanvas);
+clearCanvas(elements.speedTimelineOverlay);
+clearCanvas(elements.apTimelineCanvas);
+clearCanvas(elements.apTimelineOverlay);
 fetchEvents().catch(console.error);

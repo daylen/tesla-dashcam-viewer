@@ -32,37 +32,57 @@
             <p id="eventSubtitle" class="subtitle">The viewer will load the clips, telemetry timeline, and export controls for the selected folder.</p>
           </div>
           <div class="hero-actions">
-            <button id="playPauseButton" class="primary-button" type="button" disabled>Play</button>
             <button id="exportButton" class="ghost-button" type="button" disabled>Encode Master View</button>
+            <div id="exportBanner" class="export-banner is-idle">
+              <div class="export-banner-head">
+                <strong id="exportStatusLabel">No export running</strong>
+                <span id="exportPercent">0%</span>
+              </div>
+              <div class="export-progress-track">
+                <div id="exportProgressFill" class="export-progress-fill"></div>
+              </div>
+              <p id="exportStatusDetail" class="export-status-detail">Select a range and export only the portion you need.</p>
+            </div>
           </div>
         </section>
 
         <section class="player-layout">
           <section class="player-stage panel">
-            <div class="video-grid">
-              <div class="video-card">
-                <div class="video-label">Left Pillar</div>
-                <video id="video-left_pillar" muted playsinline preload="metadata"></video>
+            <div id="videoWall" class="video-wall">
+              <div class="video-grid">
+                <div class="video-card">
+                  <div class="video-label">Left Pillar</div>
+                  <button class="video-frame-button" data-toggle-playback type="button" aria-label="Toggle playback"></button>
+                  <video id="video-left_pillar" muted playsinline preload="metadata"></video>
+                </div>
+                <div class="video-card">
+                  <div class="video-label">Front</div>
+                  <button class="video-frame-button" data-toggle-playback type="button" aria-label="Toggle playback"></button>
+                  <video id="video-front" muted playsinline preload="metadata"></video>
+                </div>
+                <div class="video-card">
+                  <div class="video-label">Right Pillar</div>
+                  <button class="video-frame-button" data-toggle-playback type="button" aria-label="Toggle playback"></button>
+                  <video id="video-right_pillar" muted playsinline preload="metadata"></video>
+                </div>
+                <div class="video-card">
+                  <div class="video-label">Left Repeater</div>
+                  <button class="video-frame-button" data-toggle-playback type="button" aria-label="Toggle playback"></button>
+                  <video id="video-left_repeater" muted playsinline preload="metadata"></video>
+                </div>
+                <div class="video-card">
+                  <div class="video-label">Rear</div>
+                  <button class="video-frame-button" data-toggle-playback type="button" aria-label="Toggle playback"></button>
+                  <video id="video-back" muted playsinline preload="metadata"></video>
+                </div>
+                <div class="video-card">
+                  <div class="video-label">Right Repeater</div>
+                  <button class="video-frame-button" data-toggle-playback type="button" aria-label="Toggle playback"></button>
+                  <video id="video-right_repeater" muted playsinline preload="metadata"></video>
+                </div>
               </div>
-              <div class="video-card">
-                <div class="video-label">Front</div>
-                <video id="video-front" muted playsinline preload="metadata"></video>
-              </div>
-              <div class="video-card">
-                <div class="video-label">Right Pillar</div>
-                <video id="video-right_pillar" muted playsinline preload="metadata"></video>
-              </div>
-              <div class="video-card">
-                <div class="video-label">Left Repeater</div>
-                <video id="video-left_repeater" muted playsinline preload="metadata"></video>
-              </div>
-              <div class="video-card">
-                <div class="video-label">Rear</div>
-                <video id="video-back" muted playsinline preload="metadata"></video>
-              </div>
-              <div class="video-card">
-                <div class="video-label">Right Repeater</div>
-                <video id="video-right_repeater" muted playsinline preload="metadata"></video>
+              <div id="playbackOverlay" class="playback-overlay" aria-hidden="true">
+                <span id="playbackGlyph" class="playback-overlay-glyph">▶</span>
               </div>
             </div>
 
@@ -71,6 +91,28 @@
                 <span>Timeline</span>
                 <input id="timelineRange" type="range" min="0" max="0" step="0.01" value="0" disabled />
               </label>
+              <div class="telemetry-timelines">
+                <div class="telemetry-track-card">
+                  <div class="telemetry-track-head">
+                    <span>Speed</span>
+                    <strong id="speedTimelineLabel">--</strong>
+                  </div>
+                  <div class="telemetry-track-frame">
+                    <canvas id="speedTimelineCanvas" class="telemetry-track-canvas"></canvas>
+                    <canvas id="speedTimelineOverlay" class="telemetry-track-overlay"></canvas>
+                  </div>
+                </div>
+                <div class="telemetry-track-card">
+                  <div class="telemetry-track-head">
+                    <span>AP State</span>
+                    <strong id="apTimelineLabel">--</strong>
+                  </div>
+                  <div class="telemetry-track-frame is-ap">
+                    <canvas id="apTimelineCanvas" class="telemetry-track-canvas"></canvas>
+                    <canvas id="apTimelineOverlay" class="telemetry-track-overlay"></canvas>
+                  </div>
+                </div>
+              </div>
               <div class="selection-controls">
                 <div class="selection-head">
                   <span>Drag To Select Export Range</span>
@@ -144,20 +186,15 @@
               <p id="miniMapCaption" class="map-caption">The mini-map uses the embedded GPS and heading data from the dashcam metadata.</p>
             </section>
 
-            <section class="panel">
-              <div class="panel-head">
-                <h2>Segments</h2>
-                <span id="segmentCountLabel" class="status-pill">0 clips</span>
-              </div>
+            <section id="segmentsPanel" class="panel collapsible-panel is-collapsed">
+              <button id="segmentsToggle" class="collapse-toggle" type="button" aria-expanded="false">
+                <span class="collapse-heading">
+                  <span class="collapse-title">Segments</span>
+                  <span id="segmentCountLabel" class="status-pill">0 clips</span>
+                </span>
+                <span class="collapse-chevron" aria-hidden="true">⌄</span>
+              </button>
               <div id="segmentList" class="segment-list"></div>
-            </section>
-
-            <section class="panel">
-              <div class="panel-head">
-                <h2>Export</h2>
-              </div>
-              <p class="export-copy">The export encoder builds a composite MP4 with the front stream dominant and a metadata overlay driven by the decoded SEI timeline.</p>
-              <p id="exportStatus" class="subtitle">No export started.</p>
             </section>
           </aside>
         </section>
