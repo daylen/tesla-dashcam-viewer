@@ -215,6 +215,12 @@ function timelineMarkerX(width, timeSeconds, durationSeconds) {
   return (clampTime(timeSeconds) / durationSeconds) * width;
 }
 
+function timelinePositionToTime(element, clientX) {
+  const rect = element.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  return ratio * eventDuration();
+}
+
 function isFsdActive(point) {
   return point?.autopilotState === 1 || point?.autopilotLabel === "FSD";
 }
@@ -889,9 +895,7 @@ async function selectEvent(eventId) {
 }
 
 function selectionPositionToTime(clientX) {
-  const rect = elements.selectionTrack.getBoundingClientRect();
-  const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-  return ratio * eventDuration();
+  return timelinePositionToTime(elements.selectionTrack, clientX);
 }
 
 function commitSelection(start, end) {
@@ -1021,6 +1025,20 @@ function attachVideoEvents() {
   });
 }
 
+function attachTelemetryTimelineEvents() {
+  const handleSeek = (event) => {
+    if (!state.event) {
+      return;
+    }
+
+    const timeSeconds = timelinePositionToTime(event.currentTarget, event.clientX);
+    seekGlobalTime(timeSeconds, state.isPlaying).catch(console.error);
+  };
+
+  elements.speedTimelineCanvas.addEventListener("click", handleSeek);
+  elements.apTimelineCanvas.addEventListener("click", handleSeek);
+}
+
 async function fetchEvents() {
   const response = await fetch("/api/events");
   const payload = await response.json();
@@ -1098,6 +1116,7 @@ window.addEventListener("resize", () => {
 
 attachSelectionEvents();
 attachVideoEvents();
+attachTelemetryTimelineEvents();
 setSegmentsCollapsed(true);
 setVideoToggleDisabled(true);
 renderPlaybackOverlay();

@@ -361,6 +361,10 @@ a {
   display: block;
 }
 
+.telemetry-track-canvas {
+  cursor: pointer;
+}
+
 .telemetry-track-overlay {
   pointer-events: none;
 }
